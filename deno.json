@@ -3,10 +3,14 @@
   "imports": {
     "@std/assert": "jsr:@std/assert@1",
     "@types/hast": "npm:@types/hast@^3.0.4",
+    "async-mutex": "npm:async-mutex@^0.5.0",
+    "esbuild": "npm:esbuild@^0.25.0",
     "hast": "npm:hast@^1.0.0",
+    "hast-util-from-html": "npm:hast-util-from-html@^2.0.3",
     "picomatch": "npm:picomatch@^4.0.2",
     "preact": "npm:preact@^10.26.2",
-    "rollup": "npm:rollup@^4.34.8"
+    "rollup": "npm:rollup@^4.34.8",
+    "vfile": "npm:vfile@^6.0.3"
   },
   "compilerOptions": {}
 }

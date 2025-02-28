@@ -6,15 +6,17 @@ import Handlebars from "npm:handlebars@4.7.8";
 import { fromMarkdown } from "npm:mdast-util-from-markdown@2.0.2";
 import { frontmatter } from 'npm:micromark-extension-frontmatter@2.0.0'
 import { frontmatterFromMarkdown } from "npm:mdast-util-frontmatter@2.0.1";
-import { toHast } from "npm:mdast-util-to-hast@13.2.0";
+import { toHast as mdToHast } from "npm:mdast-util-to-hast@13.2.0";
 import * as unistVisit from "npm:unist-util-visit@5.0.0";
 
-import { Context } from "../../index.ts";
+import esbuild from "npm:esbuild@0.25.0";
+
+import { Context, htmlToHast } from "../../index.ts";
 
 class YamlLoader implements Arisa.Loader {
-  load(_path: string, content: string, data: Arisa.Data = {}): Arisa.Page {
-    Object.assign(data, YAML.parse(content) as Arisa.Data);
-
+  load(_path: string, data: Arisa.RawData): Arisa.Page {
+    Object.assign(data, YAML.parse(data.content as string) as Arisa.Data);
+    
     return { data };
   }
 }
@@ -27,21 +29,23 @@ class HbsLoader implements Arisa.Loader {
     public runtimeOptions?: Handlebars.RuntimeOptions,
   ) {}
 
-  loadTemplate(_path: string, templateContent: string) {
-    this.template = Handlebars.compile(templateContent, this.parseOptions);
+  load(_path: string, data: Arisa.RawData): void {
+    this.template = Handlebars.compile(data.content, this.parseOptions);
   }
 
-  load(_path: string, children: string, data: Arisa.Data = {}): Arisa.Page {
+  extend(_path: string, page: Arisa.Page): Arisa.Page {
     assert(this.template);
 
-    const html = this.template({ ...data, children }, this.runtimeOptions);
-    return { html, data };
+    const html = this.template(page.data, this.runtimeOptions);
+    const hast = htmlToHast(html);
+
+    return Object.assign(page, { hast });
   }
 }
 
 class MdLoader implements Arisa.Loader {
-  load(_path: string, content: string, data: Arisa.Data = {}): Arisa.Page {
-    const ast = fromMarkdown(content, "utf-8", {
+  load(_path: string, data: Arisa.RawData): Arisa.Page {
+    const ast = fromMarkdown(data.content, "utf-8", {
       extensions: [frontmatter(["yaml"])],
       mdastExtensions: [frontmatterFromMarkdown(["yaml"])],
     });
@@ -52,20 +56,18 @@ class MdLoader implements Arisa.Loader {
       return unistVisit.EXIT;
     })
 
-    const html = toHast(ast);
+    const hast = mdToHast(ast);
 
-    return { data, html };
+    return { data, hast };
   }
 }
 
 const ctx = new Context();
 
-ctx.addPage("content/**/*");
+ctx.add("./content/**/*", "./content");
 ctx.addLoader(".hbs", () => new HbsLoader);
 ctx.addLoader(".md", () => new MdLoader);
 ctx.addLoader([".yaml", ".yml"], () => new YamlLoader);
-
-ctx.addLayoutDir("./layout");
 
 console.log(ctx);
 

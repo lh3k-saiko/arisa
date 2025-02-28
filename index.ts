@@ -1,8 +1,14 @@
 import type * as Hast from "hast";
-import { timeStamp } from "node:console";
+import { VFile } from "vfile";
+
 import path from "node:path";
 
+import { MultiReaderSingleWriter as Mrsw } from "./src/mrsw.ts";
+
 declare global {
+  type MaybePromise<T> = T | Promise<T>;
+  type MaybeArray<T> = T | Array<T>;
+
   namespace Arisa {
     interface Data {
       sourcePath?: string,
@@ -12,73 +18,42 @@ declare global {
       atime?: Date,
       btime?: Date,
       ctime?: Date,
+      content?: string | Page,
       [index: string]: unknown,
     }
-    
+
+    interface RawData extends Data {
+      content: string
+    }
+
     interface Page {
-      html?: string | Hast.Node,
-      css?: string | string[],
-      js?: string | string[],
+      hast?: Hast.Node,
+      css?: MaybeArray<VFile | string>,
+      js?: MaybeArray<VFile | string>,
+      "assets"?: MaybeArray<VFile | string>,
       data: Data,
     }
-    
+
     interface Loader {
-      loadTemplate?: (path: string, content: string) => void | Promise<void>,
-      load: (path: string, content: string, data: Data) => Page | Promise<Page>,
-    
+      load: (path: string, data: RawData) => MaybePromise<void | Page>,
+      extend?: (path: string, page: Page) => MaybePromise<Page>,
+
       clearCache?: () => Promise<void>,
     }
   }
 }
 
-abstract class Task<V, M> {
-  private _subList: ((_ttag: number, info: M) => void | Promise<void>)[] = [];
-  private _ttag: number;
-  private _result: Promise<V> | null = null;
-
-  constructor() {
-    this._ttag = Date.now();
-  }
-
-  protected abstract work(): V | Promise<V>;
-
-  private async _getResult(): Promise<V> {
-    if(!this._result) this._result = Promise.resolve(this.work());
-
-    return await this._result;
-  }
-
-  public async getResult(callback: (info: M) => void): Promise<V> {
-    this._subList.push((_ttag, info) => callback(info));
-    return await this._getResult();
-  }
-
-  protected async getResultFrom<VV> (task: Task<VV, M>): Promise<VV> {
-    task._subList.push((_ttag, info) => this._update(_ttag, info));
-    return await task._getResult();
-  }
-
-  private async _update(_ttag: number, info: M) {
-    if(_ttag >= this._ttag) return ;
-    this._ttag = _ttag;
-
-    await Promise.all(this._subList.map(sub => sub(_ttag, info)));
-    this._subList = [];
-    this._result = null;
-  }
-
-  public async update(info: M) {
-    await this._update(Date.now(), info);
-  }
+interface NamedAssets {
+  type: 'static' | 'page';
+  match: string;
+  defaultUrlRule: (p: string) => string;
 }
 
 export class Context {
-  private _pages: string[] = [];
+  private _namedAssets: NamedAssets[] = [];
   private _loaders: Record<string, () => Arisa.Loader> = {};
-  private _layout: Record<string, string> = {};
   private _output: string = "./dist";
-  private _root: string = path.resolve(".");
-  private _globalData: Arisa.Data = {};
+  private _defaultData: Arisa.Data = {};
 
   /**
    * To include more input files.
@@ -86,16 +61,33 @@ export class Context {
    * Use [picomatch](https://www.npmjs.com/package/picomatch) to test whether files should be included.
    * 
    * ```ts
-   * addPage("./home.md"); // add one file
-   * addPage("./content/**\/*"); // add all files under ./content
+   * const ctx = new Context();
+   * 
+   * ctx.add("./home.md"); // add one file
+   * ctx.add("./content/**\/*"); // add all files under ./content
    * ```
    * 
    * @param rule One or multiple picomatch rules to be applied
    */
 
-  addPage(rule: string | string[]) {
+  add(rule: MaybeArray<string>, rootOrDefaultUrlRule?: string | ((p: string) => string)) {
     if (typeof rule === "string") rule = [rule];
-    rule.forEach(rule => this._pages.push(rule));
+
+    const root = typeof rootOrDefaultUrlRule === "string" ? rootOrDefaultUrlRule : Deno.cwd();
+    const defaultUrlRule = typeof (rootOrDefaultUrlRule) === "function" ? rootOrDefaultUrlRule :
+      (p: string) => path.relative(root, p).replaceAll('\\', '/').replace(/^\.\/+/g, "/");
+
+    rule.forEach(rule => this._namedAssets.push({ type: 'page', match: rule, defaultUrlRule }));
+  }
+
+  copy(rule: MaybeArray<string>, rootOrDefaultUrlRule?: string | ((p: string) => string)) {
+    if (typeof rule === "string") rule = [rule];
+
+    const root = typeof rootOrDefaultUrlRule === "string" ? rootOrDefaultUrlRule : Deno.cwd();
+    const defaultUrlRule = typeof (rootOrDefaultUrlRule) === "function" ? rootOrDefaultUrlRule :
+      (p: string) => path.relative(root, p).replaceAll('\\', '/').replace(/^\.\/+/g, "/");
+
+    rule.forEach(rule => this._namedAssets.push({ type: 'static', match: rule, defaultUrlRule }));
   }
 
   /**
@@ -104,7 +96,7 @@ export class Context {
    * @param ext one or more extensions
    * @param loader the loader to be set
    */
-  addLoader(ext: string | string[], loader: () => Arisa.Loader) {
+  addLoader(ext: MaybeArray<string>, loader: () => Arisa.Loader) {
     if (typeof ext === "string") ext = [ext];
     ext.map(ext => ext.startsWith(".") ? ext : "." + ext).forEach(ext => this._loaders[ext] = loader);
   }
@@ -120,41 +112,13 @@ export class Context {
 
     return null;
   }
-  
-  addLayout(name: string, templatePath: string) {
-    this._layout[name] = templatePath;
-  }
-
-  addLayoutDir(layoutDir: string, nameMap = (p: string) => path.basename(p)) {
-    function* dfs(p: string): Generator<string, void> {
-      const stat = Deno.statSync(p);
-      if(stat.isFile) {
-        yield path.resolve(p);
-        return ;
-      }
-
-      if(!stat.isDirectory) return ;
-
-      for(const dirent of Deno.readDirSync(p)) {
-        yield* dfs(path.join(p, dirent.name));
-      }
-
-      return ;
-    }
-
-    for(const p of dfs(layoutDir)) {
-      this.addLayout(nameMap(p), p);
-    }
-
-    return ;
-  }
 
   /**
    * Set the output dir.
    * 
    * @param output The new output dir to be set.
    */
-  setOutputDir(output: string) {
+  setOutputDir(output: string) { 
     this._output = output;
   }
 
@@ -163,11 +127,13 @@ export class Context {
    * 
    * @param data The new global data to be set.
    */
-  setGlobalData(data: Arisa.Data) {
-    this._globalData = data;
+  setDefaultData(data: Arisa.Data) {
+    this._defaultData = data;
   }
 
   async build(): Promise<void> {
 
   }
 }
+
+export { fromHtml as htmlToHast } from "hast-util-from-html";
