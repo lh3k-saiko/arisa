@@ -1,0 +1,11 @@
+{
+  "name": "@lh3k/arisa-framework",
+  "version": "0.0.1",
+  "exports": "./mod.ts",
+  "imports": {
+    "@std/assert": "jsr:@std/assert@^1.0.12",
+    "@types/hast": "npm:@types/hast@^3.0.4",
+    "hast": "npm:hast@^1.0.0",
+    "vfile": "npm:vfile@^6.0.3"
+  }
+}
